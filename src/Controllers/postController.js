@@ -1,190 +1,19 @@
+/**
+ * POST /api/posts
+ * Create a new post with image upload.
+ *
+ * To use in Postman:
+ * - Set method to POST and URL to http://localhost:5000/api/posts
+ * - In Body, select 'form-data'
+ * - Add a key named 'image' (type: File) and select your image file
+ * - Add other fields as needed: caption (String), location (String), hashtags (String or Array)
+ * - The backend expects the image in the 'image' field (not as base64 or JSON)
+ */
 const Post = require('../Models/Post');
 const User = require('../Models/User');
+const Comment = require('../Models/Comment'); // Add this import
 const cloudinary = require('../services/cloudinaryService');
-const multer = require('multer');
-
-// Configure multer with enhanced settings
-const storage = multer.memoryStorage();
-
-const upload = multer({ 
-  storage,
-  limits: { 
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-    fieldNameSize: 100,
-    fieldSize: 100 * 1024 * 1024,
-    fields: 10,
-    files: 1
-  },
-  fileFilter: (req, file, cb) => {
-    console.log('File filter - checking file:', {
-      fieldname: file.fieldname,
-      originalname: file.originalname,
-      mimetype: file.mimetype
-    });
-    
-    // Check if file is an image
-    if (file.mimetype && file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed'), false);
-    }
-  }
-});
-
-// Enhanced middleware with specific error handling for malformed headers
-exports.uploadMiddleware = (req, res, next) => {
-  console.log('Upload middleware called');
-  console.log('Content-Type:', req.headers['content-type']);
-  console.log('Content-Length:', req.headers['content-length']);
-  
-  // Skip multer if it's not multipart data
-  const contentType = req.headers['content-type'];
-  if (!contentType || !contentType.includes('multipart/form-data')) {
-    console.log('Not multipart data, skipping multer');
-    return next();
-  }
-  
-  const uploadSingle = upload.single('image');
-  
-  uploadSingle(req, res, (err) => {
-    if (err) {
-      console.error('Upload middleware error:', err);
-      
-      // Handle specific "Malformed part header" error
-      if (err.message && err.message.includes('Malformed part header')) {
-        return res.status(400).json({ 
-          success: false,
-          message: 'Invalid multipart data format. Please check your request format.',
-          error: 'Malformed part header - try refreshing Postman or using a different request',
-          suggestion: 'Try using JSON with imageUrl or imageBase64 instead'
-        });
-      }
-      
-      if (err instanceof multer.MulterError) {
-        if (err.code === 'LIMIT_FILE_SIZE') {
-          return res.status(400).json({ 
-            success: false,
-            message: 'File too large. Maximum size is 10MB',
-            error: err.message 
-          });
-        }
-        if (err.code === 'LIMIT_UNEXPECTED_FILE') {
-          return res.status(400).json({ 
-            success: false,
-            message: 'Unexpected field. Use "image" as field name',
-            error: err.message 
-          });
-        }
-        return res.status(400).json({ 
-          success: false,
-          message: 'File upload error', 
-          error: err.message 
-        });
-      }
-      
-      // Handle other errors (like file type validation)
-      return res.status(400).json({ 
-        success: false,
-        message: err.message || 'Upload error', 
-        error: err.message 
-      });
-    }
-    
-    console.log('Upload middleware completed successfully');
-    next();
-  });
-};
-
-// NEW: Raw binary upload endpoint (bypasses multer completely)
-exports.uploadBinary = async (req, res) => {
-  try {
-    console.log('=== BINARY UPLOAD REQUEST ===');
-    console.log('Content-Type:', req.headers['content-type']);
-    console.log('Content-Length:', req.headers['content-length']);
-    
-    const { caption, location, hashtags } = req.query; // Get metadata from query params
-    const userId = req.user.id;
-
-    // Check if we have binary data
-    if (!req.body || req.body.length === 0) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'No image data received' 
-      });
-    }
-
-    // Determine content type
-    let mimeType = req.headers['content-type'] || 'image/jpeg';
-    if (!mimeType.startsWith('image/')) {
-      mimeType = 'image/jpeg'; // Default fallback
-    }
-
-    console.log('Processing binary upload, size:', req.body.length);
-
-    // Convert buffer to base64 for Cloudinary
-    const base64 = req.body.toString('base64');
-    const dataURI = `data:${mimeType};base64,${base64}`;
-    
-    const uploadResult = await cloudinary.uploader.upload(dataURI, {
-      folder: 'instagram_clone/posts',
-      resource_type: 'image',
-      public_id: `post_${userId}_${Date.now()}`,
-      transformation: [
-        { width: 1080, height: 1080, crop: 'limit' },
-        { quality: 'auto:good' }
-      ]
-    });
-    
-    console.log('Binary upload to Cloudinary successful:', uploadResult.secure_url);
-
-    // Parse hashtags
-    let parsedHashtags = hashtags;
-    if (typeof hashtags === 'string') {
-      try {
-        parsedHashtags = JSON.parse(hashtags);
-      } catch (e) {
-        parsedHashtags = hashtags.split(/[,\s]+/).filter(tag => tag.trim());
-      }
-    }
-
-    // Create post
-    const post = await Post.create({
-      user: userId,
-      image: uploadResult.secure_url,
-      caption: caption || '',
-      location: location || '',
-      hashtags: parsedHashtags || []
-    });
-
-    // Add post to user's posts array
-    await User.findByIdAndUpdate(userId, {
-      $push: { posts: post._id }
-    });
-
-    // Populate user details for response
-    const populatedPost = await Post.findById(post._id)
-      .populate('user', 'username fullName profilePicture');
-
-    res.status(201).json({
-      success: true,
-      message: 'Post created successfully via binary upload',
-      post: populatedPost,
-      uploadInfo: {
-        cloudinaryUrl: uploadResult.secure_url,
-        publicId: uploadResult.public_id,
-        size: req.body.length
-      }
-    });
-
-  } catch (error) {
-    console.error('Binary upload error:', error);
-    res.status(500).json({ 
-      success: false,
-      message: 'Failed to upload image', 
-      error: error.message 
-    });
-  }
-};
+const imageUploader = require('../utils/imageUploader');
 
 // Create new post (supports file upload, base64, and URL)
 exports.createPost = async (req, res) => {
@@ -197,21 +26,18 @@ exports.createPost = async (req, res) => {
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
       size: req.file.size
-    } : 'No file');
+    } : null);
 
-    const body = req.body || {};
-    const { caption, location, hashtags, imageBase64, imageUrl } = body;
+    const { caption, location, hashtags, imageBase64, imageUrl } = req.body;
     const userId = req.user.id;
-
     let uploadResult;
 
-    // Handle different image input methods
+    // File upload (form-data with multer)
     if (req.file) {
-      // File upload via multer (form-data)
       console.log('Processing file upload...');
       
       try {
-        // Convert buffer to base64 for Cloudinary
+        // Convert buffer to base64 for Cloudinary upload
         const base64 = req.file.buffer.toString('base64');
         const dataURI = `data:${req.file.mimetype};base64,${base64}`;
         
@@ -286,7 +112,7 @@ exports.createPost = async (req, res) => {
           hasFile: !!req.file,
           hasBase64: !!imageBase64,
           hasUrl: !!imageUrl,
-          bodyKeys: Object.keys(body),
+          bodyKeys: Object.keys(req.body),
           contentType: req.headers['content-type']
         }
       });
@@ -321,8 +147,7 @@ exports.createPost = async (req, res) => {
 
     // Populate user details for response
     const populatedPost = await Post.findById(post._id)
-      .populate('user', 'username fullName profilePicture')
-      .populate('comments');
+      .populate('user', 'username fullName profilePicture');
 
     res.status(201).json({
       success: true,
@@ -337,6 +162,102 @@ exports.createPost = async (req, res) => {
 
   } catch (error) {
     console.error('Create post error:', error);
+    
+    // Handle Cloudinary errors
+    if (error.http_code) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Image upload failed', 
+        error: error.message 
+      });
+    }
+
+    res.status(500).json({ 
+      success: false,
+      message: 'Failed to create post', 
+      error: error.message 
+    });
+  }
+};
+
+// NEW: Raw binary upload endpoint (bypasses multer completely)
+exports.uploadBinary = async (req, res) => {
+  try {
+    console.log('=== BINARY UPLOAD REQUEST ===');
+    console.log('Content-Type:', req.headers['content-type']);
+    console.log('Content-Length:', req.headers['content-length']);
+    
+    const { caption, location, hashtags } = req.query; // Get metadata from query params
+    const userId = req.user.id;
+
+    // Check if we have binary data
+    if (!req.body || req.body.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'No image data received' 
+      });
+    }
+
+    // Determine content type
+    let mimeType = req.headers['content-type'] || 'image/jpeg';
+    if (!mimeType.startsWith('image/')) {
+      mimeType = 'image/jpeg'; // Default fallback
+    }
+
+    console.log('Processing binary upload, size:', req.body.length);
+
+    // Convert buffer to base64 for Cloudinary
+    const base64 = req.body.toString('base64');
+    const dataURI = `data:${mimeType};base64,${base64}`;
+    
+    const uploadResult = await cloudinary.uploader.upload(dataURI, {
+      folder: 'instagram_clone/posts',
+      resource_type: 'image',
+      public_id: `post_${userId}_${Date.now()}`,
+      transformation: [
+        { width: 1080, height: 1080, crop: 'limit' },
+        { quality: 'auto:good' }
+      ]
+    });
+    
+    console.log('Binary upload to Cloudinary successful:', uploadResult.secure_url);
+
+    // Parse hashtags
+    let parsedHashtags = hashtags;
+    if (typeof hashtags === 'string') {
+      try {
+        parsedHashtags = JSON.parse(hashtags);
+      } catch (e) {
+        parsedHashtags = hashtags.split(/[,\s]+/).filter(tag => tag.trim());
+      }
+    }
+
+    // Create post
+    const post = await Post.create({
+      user: userId,
+      image: uploadResult.secure_url,
+      caption: caption || '',
+      location: location || '',
+      hashtags: parsedHashtags || []
+    });
+
+    // Add post to user's posts array
+    await User.findByIdAndUpdate(userId, {
+      $push: { posts: post._id }
+    });
+
+    // Populate user details for response
+    const populatedPost = await Post.findById(post._id)
+      .populate('user', 'username fullName profilePicture');
+
+    res.status(201).json({
+      success: true,
+      message: 'Post created successfully',
+      post: populatedPost
+    });
+
+  } catch (error) {
+    console.error('Binary upload error:', error);
     
     // Handle Cloudinary errors
     if (error.http_code) {
