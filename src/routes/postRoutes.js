@@ -3,8 +3,8 @@ const router = express.Router();
 const authMiddleware = require('../Controllers/authMiddleware');
 const postController = require('../Controllers/postController');
 
-// POST /api/posts - Create new post
-router.post('/', authMiddleware, postController.createPost);
+// POST /api/posts - Create new post (with file upload support)
+router.post('/', authMiddleware, postController.uploadMiddleware, postController.createPost);
 
 // GET /api/posts/feed - Get user feed
 router.get('/feed', authMiddleware, postController.getFeed);
