@@ -50,6 +50,7 @@ exports.createPost = async (req, res) => {
   } catch (error) {
     console.error('Create post error:', error);
     
+    
     // Handle Cloudinary errors
     if (error.http_code) {
       return res.status(400).json({ 
